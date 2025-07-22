@@ -130,3 +130,11 @@ python megatron_gpt.py -bs 16 -model gpt-2 -cluster clusters/dgx1_v100_2ib/n4_g8
 
 export CUDA_VISIBLE_DEVICES=7
 python megatron_gpt.py -bs 16 -model gpt-2 -cluster clusters/dgx1_v100_2ib/n1_g1.json --bucket-size 25 --no-seq-first --profile-iters 3 --reprofile
+
+
+
+
+# test 1n8g
+export PYTHONPATH=$PYTHONPATH:/local/ytyang/yichengfeng/Proteus
+export CUDA_VISIBLE_DEVICES=4
+python megatron_gpt.py -bs 1 -model gpt-2 -cluster clusters/h800/n2_g1.json --bucket-size 25 --no-seq-first --profile-iters 1
