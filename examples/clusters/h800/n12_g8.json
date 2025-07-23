@@ -1,0 +1,15 @@
+{
+    "n_node": 12,
+    "n_gpu_per_node": 8,
+    "gpu_gflops": 1,
+    "gpu_memory": 1,
+    "gpu_memory_bw": 1,
+    "n_cpu_per_node": 0,
+    "cpu_gflops": 1,
+    "cpu_memory": 1,
+    "cpu_memory_bw": 1,
+    "gpu_to_gpu": 1,
+    "cpu_to_gpu": 1,
+    "cpu_to_cpu": 1,
+    "inter_node": 7
+}

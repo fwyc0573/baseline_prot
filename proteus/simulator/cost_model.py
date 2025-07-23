@@ -164,8 +164,9 @@ class OpCostModel:
         reprofiled_op[key] = True
         return cost
 
+    # previous used...
     @staticmethod
-    def comm_cost(type, volume, bw, group='default', root=0, FlexFlow=False):
+    def my_comm_cost(type, volume, bw, group='default', root=0, FlexFlow=False):
         if type in ['cpu2gpu', 'gpu2cpu']:
             ct = 0.05 + volume / 12
             return ct
@@ -216,15 +217,15 @@ class OpCostModel:
                     groups_rank_.append(gr)
 
             # 打印传入 Communicator 的参数信息
-            # print("---> Communicator info <---")
-            # print("groups_:", groups_)
-            # print("groups_rank_:", groups_rank_)
-            # print("len(group):", len(group))
-            # print("len(local_rank_groups):", len(local_rank_groups))
-            # print("group:", group)
-            # print("local_rank_groups:", local_rank_groups)
-            # print("---> Communicator info <---")
-            # print("topofile:", topofile)
+            print("---> Communicator info <---")
+            print("groups_:", groups_)
+            print("groups_rank_:", groups_rank_)
+            print("len(group):", len(group))
+            print("len(local_rank_groups):", len(local_rank_groups))
+            print("group:", group)
+            print("local_rank_groups:", local_rank_groups)
+            print("---> Communicator info <---")
+            print("topofile:", topofile)
 
             _communicators[key] = binding.Communicator(groups_, groups_rank_,
                                                        len(group),
@@ -243,7 +244,24 @@ class OpCostModel:
             # return comm_all_reduce(volume, bw, len(group))
             ct = comm.reduce(math.ceil(volume * 1e6), root)
         elif type == 'all_reduce':
-            # # return comm_all_reduce(volume, bw, len(group))
+            # ct = comm.allreduce(math.ceil(volume * 1e6))
+            # if len(group) == 8 and 'titan' in OpCostModel.cluster.topo_file:
+            #     # titanxp all_reduce bandwidth adjust
+            #     ct = (4.2, ct[1])
+            nbytes = [4,16,64,256,1024]
+            # allreduce: 0.8 (tree and 1N8G)
+            # allgather: 1.0
+            # reducescatter: 0.33
+            for nbyte in nbytes:
+            # ct = comm.allreduce(math.ceil(nbytes))
+                ct = comm.allreduce(math.ceil(nbyte * 1024 * 1024))
+                lat = ct[0]
+                bw = ct[1]
+                cost = (lat + nbyte * 1024 / bw) / 1000 * 0.8
+                print(f"nbyte:{nbyte}, lat:{lat}, bw:{bw}")
+                print(f"Proteus: nbyte:{nbyte}, time:{cost*1000:.2f}")
+            print(f"type_intra:{type_intra}, type_inter:{type_inter}, cross_node:{cross_node}")
+            # raise 0
             # # input__shape=[1685073920],input__dtype=torch.float16
             # nbytes = 256 * 1024 * 1024
             # ct = comm.allreduce(math.ceil(nbytes))
@@ -254,6 +272,96 @@ class OpCostModel:
             # if len(group) == 8 and 'titan' in OpCostModel.cluster.topo_file:
             #     # titanxp all_reduce bandwidth adjust
             #     ct = (4.2, ct[1])
+            # return comm_all_reduce(volume, bw, len(group))
+
+        elif type == 'all_gather':
+            # return comm_all_gather(volume, bw, len(group))
+            ct = comm.allgather(math.ceil(volume * 1e6))
+        elif type == 'reduce_scatter':
+            # return comm_reduce_scatter(volume, bw, len(group))
+            ct = comm.reduce_scatter(math.ceil(volume * 1e6))
+        elif type == 'scatter' or type == 'gather':
+            ct = comm.broadcast(math.ceil(volume * 1e6), root)
+        elif type == 'all_to_all':
+            ct = comm.broadcast(math.ceil(volume * 1e6), 0)
+            if cross_node:
+                # low utilization and approximate bandwidth share
+                ct = (0.5 * ct[0] / OpCostModel.cluster.n_node, ct[1] * 0.5)
+            else:
+                ct = (ct[0], ct[1] * 0.1)
+        else:
+            raise NotImplementedError
+        
+        # print(ct, type_intra, type_inter, cross_node)
+        # raise 0
+        return ct, type_intra, type_inter, cross_node
+
+    @staticmethod
+    def comm_cost(type, volume, bw, group='default', root=0, FlexFlow=False):
+        if type in ['cpu2gpu', 'gpu2cpu']:
+            ct = 0.05 + volume / 12
+            return ct
+
+        global _communicators
+        if group == 'default':
+            group = [i for i in range(OpCostModel.cluster.ngpus)]
+        key = ''
+        sort_group = sorted(group)
+        for g in sort_group:
+            key = key + str(g) + ','
+        if key not in _communicators:
+            n_gpu_per_node = OpCostModel.cluster.n_gpu_per_node
+            topofile = OpCostModel.cluster.topo_file
+            local_rank_groups, group_ranks = [], []
+            cgroup, cg_rank = [], []
+            cur_node_id = -1
+            intra_node_rank = 0
+            for g in sort_group:
+                if g // n_gpu_per_node == cur_node_id:
+                    cgroup.append(g % n_gpu_per_node)
+                    cg_rank.append(intra_node_rank)
+                    intra_node_rank += 1
+                else:
+                    if len(cgroup) > 0:
+                        local_rank_groups.append(cgroup)
+                        group_ranks.append(cg_rank)
+                    # init
+                    cgroup = []
+                    cg_rank = []
+                    intra_node_rank = 0
+                    cur_node_id = g // n_gpu_per_node
+                    # set rank and group
+                    cgroup.append(g % n_gpu_per_node)
+                    cg_rank.append(intra_node_rank)
+                    intra_node_rank += 1
+            if len(cgroup) > 0:
+                local_rank_groups.append(cgroup)
+                group_ranks.append(cg_rank)
+            groups_, groups_rank_ = [], []
+            group_set = set()
+            for lg, gr in zip(local_rank_groups, group_ranks):
+                if tuple(lg) not in group_set:
+                    group_set.add(tuple(lg))
+                    groups_.append(lg)
+                    groups_rank_.append(gr)
+
+            _communicators[key] = binding.Communicator(groups_, groups_rank_,
+                                                       len(group),
+                                                       len(local_rank_groups),
+                                                       topofile)
+
+        comm = _communicators[key]
+        type_intra = comm.get_graph_type_intra()
+        type_inter = comm.get_graph_type_inter()
+        cross_node = comm.get_cross_node()
+
+        if type == 'p2p':
+            # return comm_p2p(volume, bw)
+            ct = comm.broadcast(math.ceil(volume * 1e6), root)
+        elif type == 'reduce':
+            # return comm_all_reduce(volume, bw, len(group))
+            ct = comm.reduce(math.ceil(volume * 1e6), root)
+        elif type == 'all_reduce':
             # return comm_all_reduce(volume, bw, len(group))
             ct = comm.allreduce(math.ceil(volume * 1e6))
             if len(group) == 8 and 'titan' in OpCostModel.cluster.topo_file:
@@ -276,9 +384,6 @@ class OpCostModel:
                 ct = (ct[0], ct[1] * 0.1)
         else:
             raise NotImplementedError
-        
-        # print(ct, type_intra, type_inter, cross_node)
-        # raise 0
         return ct, type_intra, type_inter, cross_node
 
 
